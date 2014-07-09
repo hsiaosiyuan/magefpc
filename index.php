@@ -63,8 +63,11 @@ if (file_exists($maintenanceFile)) {
 #是否开启 FPC
 const HLN35_FPC_ENABLE = true;
 
+#是否开启调试
+const HLN35_FPC_DEBUG = true;
+
 #cache 过期时间
-const HLN35_FPC_CACHE_EXPIRE = 3600;
+const HLN35_FPC_CACHE_EXPIRE = 43200;
 
 #cache adapter 当前可选 apc 或者 filesystem 默认是 filesystem
 const HLN35_FPC_CACHE_ADAPTER = 'filesystem';
@@ -80,21 +83,27 @@ const HLN35_FPC_IS_URL_WRITE_OPEN = false;
 
 #no cache filters
 $Hln35_FPC_NO_CACHE_FILTERS = array(
-    array(
-        'm' => 'customer',
-        'c' => 'account|address',
-        'a' => '*'
-    ),
-    array(
-        'm' => 'admin',
-        'c' => '*',
-        'a' => '*'
-    )
+    // add filters here
 );
 ################################################ Hln35 FPC Settings end ##############################
 
 
 ################################################ Hln35 FPC Body start ################################
+if (HLN35_FPC_DEBUG) {
+    date_default_timezone_set('Asia/Shanghai');
+
+// uncomment below to debug index.php when you get a white screen
+//    register_shutdown_function(function () {
+//        if (($err = error_get_last()) !== null)
+//            var_dump($err);
+//    });
+
+    function rLog()
+    {
+        file_put_contents('fpc.log', implode(',', func_get_args()) . "\n", FILE_APPEND);
+    }
+}
+
 const _DS_ = DIRECTORY_SEPARATOR;
 
 //below is magento default startup logic
@@ -132,10 +141,34 @@ function _getNoCacheOutput()
     return $ret;
 }
 
+function _getRequestPathInfo()
+{
+    if (isset($_SERVER['PATH_INFO'])) {
+        return trim($_SERVER['PATH_INFO'], '/');
+    }
+
+    $path = trim($_SERVER['REQUEST_URI'], '/');
+    $self = trim($_SERVER['PHP_SELF'], '/');
+
+    if (($idx = strpos($path, '?')) !== false) {
+        $path = substr($path, 0, $idx);
+    }
+
+    $rootDir = dirname($self);
+    if (($idx = strrpos($path, $rootDir)) === 0) {
+        $path = substr($path, strlen($rootDir));
+    }
+
+    if (($idx = strpos($path, 'index.php')) !== false) {
+        $path = substr($path, strlen('index.php'));
+    }
+
+    return trim($path, '/');
+}
+
 function _parseModelControllerAction()
 {
-    $requestPath = empty($_SERVER['PATH_INFO']) ? '' : $_SERVER['PATH_INFO'];
-    $requestPath = trim($requestPath, '/');
+    $requestPath = _getRequestPathInfo();
     $parts = explode('/', $requestPath);
 
     return array(
@@ -150,55 +183,67 @@ function _isOutOfCache()
 {
     global $Hln35_FPC_NO_CACHE_FILTERS;
     $mca = _parseModelControllerAction();
-    $isOutOf = false;
-    //note here, when the request is homepage, the count of $mca will be zero,
-    //this means home page will always under the cache logic
-    if ($mca['count']) {
-        foreach ($Hln35_FPC_NO_CACHE_FILTERS as $filter) {
-            if (!$isOutOf) {
-                if ($mca['m'] !== null && $mca['m'] === $filter['m']) {
-                    if ($filter['c'] === '*') {
-                        $isOutOf = true;
-                        break;
-                    } else {
-                        $cColl = explode('|', $filter['c']);
-                        foreach ($cColl as $c) {
-                            if ($c === $mca['c']) {
-                                if ($filter['a'] === '*') {
-                                    $isOutOf = true;
-                                    break;
-                                } else {
-                                    $aColl = explode('|', $filter['a']);
-                                    foreach ($aColl as $a) {
-                                        if ($a === $mca['a']) {
-                                            $isOutOf = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                break;
-            }
+
+    if ($mca['count'] === 0 || $mca['m'] === null)
+        return false;
+
+    foreach ($Hln35_FPC_NO_CACHE_FILTERS as $filter) {
+        if ($mca['m'] === $filter['m']) {
+            if ($filter['c'] === '*')
+                return true;
+
+            $cColl = explode('|', $filter['c']);
+            if (!in_array($mca['c'], $cColl))
+                return false;
+
+            if ($filter['a'] === '*')
+                return true;
+
+            $aColl = explode('|', $filter['a']);
+            return in_array($mca['a'], $aColl);
         }
     }
 
-    return $isOutOf;
+    return false;
+}
+
+if (!function_exists('getallheaders')) {
+    function getallheaders()
+    {
+        $headers = '';
+        foreach ($_SERVER as $name => $value) {
+            if (substr($name, 0, 5) == 'HTTP_') {
+                $headers[str_replace(' ', '-', ucwords(strtolower(str_replace('_', ' ', substr($name, 5)))))] = $value;
+            }
+        }
+        return $headers;
+    }
 }
 
 $requestUri = $_SERVER['REQUEST_URI'];
-$headers = apache_request_headers();
+$headers = getallheaders();
 $isAjax = isset($headers['X-Requested-With']) && strtolower($headers['X-Requested-With']) === 'xmlhttprequest';
 
 $userAgent = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : false;
 $isIPhone = $userAgent && strpos($userAgent, 'iPhone') !== false;
-//$isIPad = $userAgent && strpos($userAgent, 'iPad') !== false;
 $isAndroid = $userAgent && strpos($userAgent, 'Android') !== false;
 
 $isMobile = $isIPhone || $isAndroid;
+
+if (HLN35_FPC_DEBUG) {
+    rLog(
+        HLN35_FPC_ENABLE,                                                    // fpc_enable
+        date('Y-m-d H:i:s', filectime(__FILE__)),                            // idx_ctime
+        $requestUri,                                                         // request_uri
+        _getRequestPathInfo(),                                               // path_info
+        date('Y-m-d H:i:s', time()),                                         // request_time
+        $_SERVER['SERVER_ADDR'],                                             // server_addr
+        $isAjax,                                                             // is_ajax
+        $isMobile,                                                           // is_mobile
+        _isOutOfCache(),                                                     // is_out_of_cache
+        HLN35_FPC_ENABLE && !$isAjax && !$isMobile && !_isOutOfCache()       // all_cond_union
+    );
+}
 
 if (HLN35_FPC_ENABLE && !$isAjax && !$isMobile && !_isOutOfCache()) {
     $output = '';
